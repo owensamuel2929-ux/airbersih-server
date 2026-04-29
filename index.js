@@ -1,6 +1,6 @@
 require('dotenv').config({ path: __dirname + '/.env' });
 const express = require('express');
-const twilio = require('twilio');
+const axios = require('axios');
 const { Pool } = require('pg');
 const { Invoice } = require('xendit-node');
 
@@ -8,13 +8,10 @@ const db = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectU
 const xenditInvoice = new Invoice({ secretKey: process.env.XENDIT_SECRET_KEY });
 
 const app = express();
-app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
 
-const twilioClient = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
-
 const PRICE_PER_UNIT = 40000;
-const WORKER_PHONE = process.env.WORKER_PHONE; // e.g. whatsapp:+628xxx
+const WORKER_PHONE = process.env.WORKER_PHONE; // e.g. 6281289922852
 
 const sessions = {};
 
@@ -22,17 +19,37 @@ function generateOTP() {
   return Math.floor(1000 + Math.random() * 9000).toString();
 }
 
-// ─── Customer + Worker incoming messages ────────────────────────────────────
+// ─── Meta webhook verification ───────────────────────────────────────────────
+app.get('/webhook/whatsapp', (req, res) => {
+  const mode = req.query['hub.mode'];
+  const token = req.query['hub.verify_token'];
+  const challenge = req.query['hub.challenge'];
+
+  if (mode === 'subscribe' && token === process.env.WEBHOOK_VERIFY_TOKEN) {
+    console.log('Webhook verified!');
+    return res.status(200).send(challenge);
+  }
+  res.sendStatus(403);
+});
+
+// ─── Incoming WhatsApp messages ──────────────────────────────────────────────
 app.post('/webhook/whatsapp', async (req, res) => {
-  const phone = req.body.From;
-  const message = req.body.Body?.trim();
-  const text = message?.toLowerCase();
+  res.sendStatus(200); // always ACK Meta first
+
+  const entry = req.body?.entry?.[0];
+  const change = entry?.changes?.[0];
+  const messageObj = change?.value?.messages?.[0];
+
+  if (!messageObj || messageObj.type !== 'text') return;
+
+  const phone = messageObj.from; // e.g. 6281289922852
+  const message = messageObj.text.body.trim();
+  const text = message.toLowerCase();
 
   console.log(`Message from ${phone}: ${message}`);
 
   // ── Worker messages ──────────────────────────────────────────────────────
   if (phone === WORKER_PHONE) {
-    // Worker accepts job
     if (text === '1') {
       const result = await db.query(
         `SELECT * FROM orders WHERE worker_phone = $1 AND status = 'assigned' ORDER BY created_at DESC LIMIT 1`,
@@ -41,7 +58,7 @@ app.post('/webhook/whatsapp', async (req, res) => {
       const order = result.rows[0];
       if (!order) {
         await sendWhatsApp(phone, 'Tidak ada order yang perlu dikonfirmasi.');
-        return res.sendStatus(200);
+        return;
       }
       await db.query(`UPDATE orders SET status = 'in_progress' WHERE id = $1`, [order.id]);
       await sendWhatsApp(phone,
@@ -53,20 +70,18 @@ app.post('/webhook/whatsapp', async (req, res) => {
       await sendWhatsApp(order.client_phone,
         `🔧 *Teknisi dalam perjalanan!*\n\nOrder #${order.id} sudah diterima teknisi.\nJadwal: ${order.schedule}\n\nKode konfirmasi kamu: *${order.otp_code}*\nBerikan kode ini ke teknisi SETELAH pekerjaan selesai.`
       );
-      return res.sendStatus(200);
+      return;
     }
 
-    // Worker rejects job
     if (text === '2') {
       await db.query(
         `UPDATE orders SET status = 'paid', worker_phone = NULL WHERE worker_phone = $1 AND status = 'assigned'`,
         [WORKER_PHONE]
       );
       await sendWhatsApp(phone, 'Order ditolak. Admin akan assign ulang.');
-      return res.sendStatus(200);
+      return;
     }
 
-    // Worker submits OTP (4-digit number)
     if (/^\d{4}$/.test(text)) {
       const result = await db.query(
         `SELECT * FROM orders WHERE worker_phone = $1 AND otp_code = $2 AND status = 'in_progress' AND otp_expires_at > NOW()`,
@@ -75,24 +90,21 @@ app.post('/webhook/whatsapp', async (req, res) => {
       const order = result.rows[0];
       if (!order) {
         await sendWhatsApp(phone, '❌ Kode salah atau sudah kadaluarsa.');
-        return res.sendStatus(200);
+        return;
       }
-
       await db.query(`UPDATE orders SET status = 'completed', completed_at = NOW() WHERE id = $1`, [order.id]);
       await sendWhatsApp(phone,
         `✅ Order #${order.id} selesai!\nPendapatan: Rp ${Math.floor(order.total * 0.87).toLocaleString('id-ID')}\nAkan ditransfer dalam 1x24 jam.`
       );
-
-      // Ask customer for rating
       sessions[order.client_phone] = { step: 'waiting_rating', orderId: order.id };
       await sendWhatsApp(order.client_phone,
         `🎉 AC kamu sudah bersih!\n\nBagaimana pelayanan teknisi kami?\nBalas dengan angka *1–5*\n\n5 = Sangat puas\n1 = Tidak puas`
       );
-      return res.sendStatus(200);
+      return;
     }
 
     await sendWhatsApp(phone, 'Balas *1* untuk terima order, *2* untuk tolak, atau kirim kode 4 digit dari pelanggan.');
-    return res.sendStatus(200);
+    return;
   }
 
   // ── Customer messages ────────────────────────────────────────────────────
@@ -101,7 +113,6 @@ app.post('/webhook/whatsapp', async (req, res) => {
 
   let reply;
 
-  // Rating flow
   if (session.step === 'waiting_rating') {
     const score = parseInt(text);
     if (isNaN(score) || score < 1 || score > 5) {
@@ -112,10 +123,9 @@ app.post('/webhook/whatsapp', async (req, res) => {
       reply = `⭐ Terima kasih atas rating *${score}/5*!\nSampai jumpa di layanan berikutnya. 🙏`;
     }
     await sendWhatsApp(phone, reply);
-    return res.sendStatus(200);
+    return;
   }
 
-  // Booking flow
   if (text === 'cuci ac' || text === 'pesan') {
     session.step = 'waiting_units';
     reply = 'Halo! Selamat datang di AirBersih 🌬️\n\nBerapa unit AC yang mau dicuci? Ketik angkanya (contoh: 2)';
@@ -139,16 +149,14 @@ app.post('/webhook/whatsapp', async (req, res) => {
     const scheduleRegex = /^(\d{2})\/(\d{2})\/(\d{2})\s+jam\s+(\d{1,2}):(\d{2})$/i;
     const match = message.match(scheduleRegex);
     if (!match) {
-      reply = `Format tanggal salah. Ketik seperti contoh ini:\n*29/04/25 jam 10:00*`;
-      await sendWhatsApp(phone, reply);
-      return res.sendStatus(200);
+      await sendWhatsApp(phone, `Format tanggal salah. Ketik seperti contoh ini:\n*29/04/25 jam 10:00*`);
+      return;
     }
     const [, day, month, year, hour, minute] = match;
     const parsedDate = new Date(`20${year}-${month}-${day}T${hour.padStart(2,'0')}:${minute}:00`);
     if (isNaN(parsedDate.getTime()) || parsedDate < new Date()) {
-      reply = `Tanggal tidak valid atau sudah lewat. Coba lagi:\nContoh: *29/04/25 jam 10:00*`;
-      await sendWhatsApp(phone, reply);
-      return res.sendStatus(200);
+      await sendWhatsApp(phone, `Tanggal tidak valid atau sudah lewat. Coba lagi:\nContoh: *29/04/25 jam 10:00*`);
+      return;
     }
     session.schedule = `${day}/${month}/${year} jam ${hour.padStart(2,'0')}:${minute}`;
     session.scheduledAt = parsedDate.toISOString();
@@ -196,7 +204,6 @@ app.post('/webhook/whatsapp', async (req, res) => {
   }
 
   await sendWhatsApp(phone, reply);
-  res.sendStatus(200);
 });
 
 // ─── Xendit payment webhook ──────────────────────────────────────────────────
@@ -212,7 +219,7 @@ app.post('/webhook/xendit', async (req, res) => {
   if (isNaN(orderId)) return res.sendStatus(200);
 
   const otp = generateOTP();
-  const otpExpiry = new Date(Date.now() + 6 * 60 * 60 * 1000); // 6 hours
+  const otpExpiry = new Date(Date.now() + 6 * 60 * 60 * 1000);
 
   const result = await db.query(
     `UPDATE orders SET status = 'assigned', otp_code = $1, otp_expires_at = $2, worker_phone = $3
@@ -223,12 +230,10 @@ app.post('/webhook/xendit', async (req, res) => {
   const order = result.rows[0];
   if (!order) return res.sendStatus(200);
 
-  // Notify customer
   await sendWhatsApp(order.client_phone,
-    `🎉 *Pembayaran diterima!*\n\nOrder #${orderId} dikonfirmasi.\nTeknisi kami sedang menuju lokasi kamu.\n\nKode konfirmasi: *${otp}*\nBerikan kode ini ke teknisi SETELAH AC selesai dibersihkan.`
+    `🎉 *Pembayaran diterima!*\n\nOrder #${orderId} dikonfirmasi.\n\nKode konfirmasi: *${otp}*\nBerikan kode ini ke teknisi SETELAH AC selesai dibersihkan.`
   );
 
-  // Notify worker
   await sendWhatsApp(WORKER_PHONE,
     `🔔 *Ada Order Baru! #${orderId}*\n\n` +
     `📦 Unit: ${order.units} AC\n` +
@@ -241,14 +246,25 @@ app.post('/webhook/xendit', async (req, res) => {
   res.sendStatus(200);
 });
 
-async function sendWhatsApp(phone, text) {
-  await twilioClient.messages.create({
-    from: `whatsapp:${process.env.TWILIO_WHATSAPP_NUMBER}`,
-    to: phone,
-    body: text,
-  });
+// ─── Send WhatsApp via Meta Cloud API ───────────────────────────────────────
+async function sendWhatsApp(to, text) {
+  await axios.post(
+    `https://graph.facebook.com/v19.0/${process.env.META_PHONE_NUMBER_ID}/messages`,
+    {
+      messaging_product: 'whatsapp',
+      to: to,
+      type: 'text',
+      text: { body: text },
+    },
+    {
+      headers: {
+        Authorization: `Bearer ${process.env.META_ACCESS_TOKEN}`,
+        'Content-Type': 'application/json',
+      },
+    }
+  );
 }
 
-app.listen(3000, () => {
-  console.log('Server is running on port 3000');
+app.listen(process.env.PORT || 3000, () => {
+  console.log('Server is running on port', process.env.PORT || 3000);
 });
