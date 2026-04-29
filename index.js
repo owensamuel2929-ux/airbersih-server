@@ -248,21 +248,25 @@ app.post('/webhook/xendit', async (req, res) => {
 
 // ─── Send WhatsApp via Meta Cloud API ───────────────────────────────────────
 async function sendWhatsApp(to, text) {
-  await axios.post(
-    `https://graph.facebook.com/v19.0/${process.env.META_PHONE_NUMBER_ID}/messages`,
-    {
-      messaging_product: 'whatsapp',
-      to: to,
-      type: 'text',
-      text: { body: text },
-    },
-    {
-      headers: {
-        Authorization: `Bearer ${process.env.META_ACCESS_TOKEN}`,
-        'Content-Type': 'application/json',
+  try {
+    await axios.post(
+      `https://graph.facebook.com/v19.0/${process.env.META_PHONE_NUMBER_ID}/messages`,
+      {
+        messaging_product: 'whatsapp',
+        to: to,
+        type: 'text',
+        text: { body: text },
       },
-    }
-  );
+      {
+        headers: {
+          Authorization: `Bearer ${process.env.META_ACCESS_TOKEN}`,
+          'Content-Type': 'application/json',
+        },
+      }
+    );
+  } catch (err) {
+    console.error(`Failed to send to ${to}:`, err.response?.data || err.message);
+  }
 }
 
 app.listen(process.env.PORT || 3000, () => {
