@@ -138,7 +138,7 @@ app.post('/webhook/whatsapp', async (req, res) => {
       return;
     }
     const [, day, month, year, hour, minute] = match;
-    const parsedDate = new Date(`20${year}-${month}-${day}T${hour.padStart(2,'0')}:${minute}:00`);
+    const parsedDate = new Date(`20${year}-${month}-${day}T${hour.padStart(2,'0')}:${minute}:00+07:00`);
     if (isNaN(parsedDate.getTime()) || parsedDate < new Date()) {
       await sendWhatsApp(phone, `Tanggal tidak valid atau sudah lewat. Coba lagi:\nContoh: *29/04/25 jam 10:00*`);
       return;
