@@ -1,17 +1,19 @@
 require('dotenv').config({ path: __dirname + '/.env' });
 const express = require('express');
-const axios = require('axios');
+const twilio = require('twilio');
 const { Pool } = require('pg');
 const { Invoice } = require('xendit-node');
 
 const db = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
 const xenditInvoice = new Invoice({ secretKey: process.env.XENDIT_SECRET_KEY });
+const twilioClient = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
 
 const app = express();
+app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
 
 const PRICE_PER_UNIT = 40000;
-const WORKER_PHONE = process.env.WORKER_PHONE; // e.g. 6281289922852
+const WORKER_PHONE = process.env.WORKER_PHONE; // e.g. whatsapp:+6281289922852
 
 const sessions = {};
 
@@ -19,32 +21,15 @@ function generateOTP() {
   return Math.floor(1000 + Math.random() * 9000).toString();
 }
 
-// ─── Meta webhook verification ───────────────────────────────────────────────
-app.get('/webhook/whatsapp', (req, res) => {
-  const mode = req.query['hub.mode'];
-  const token = req.query['hub.verify_token'];
-  const challenge = req.query['hub.challenge'];
-
-  if (mode === 'subscribe' && token === process.env.WEBHOOK_VERIFY_TOKEN) {
-    console.log('Webhook verified!');
-    return res.status(200).send(challenge);
-  }
-  res.sendStatus(403);
-});
-
 // ─── Incoming WhatsApp messages ──────────────────────────────────────────────
 app.post('/webhook/whatsapp', async (req, res) => {
-  res.sendStatus(200); // always ACK Meta first
+  res.sendStatus(200); // always ACK Twilio first
 
-  const entry = req.body?.entry?.[0];
-  const change = entry?.changes?.[0];
-  const messageObj = change?.value?.messages?.[0];
-
-  if (!messageObj || messageObj.type !== 'text') return;
-
-  const phone = messageObj.from; // e.g. 6281289922852
-  const message = messageObj.text.body.trim();
+  const phone = req.body.From;   // e.g. whatsapp:+6281289922852
+  const message = (req.body.Body || '').trim();
   const text = message.toLowerCase();
+
+  if (!phone || !message) return;
 
   console.log(`Message from ${phone}: ${message}`);
 
@@ -246,27 +231,17 @@ app.post('/webhook/xendit', async (req, res) => {
   res.sendStatus(200);
 });
 
-// ─── Send WhatsApp via Meta Cloud API ───────────────────────────────────────
+// ─── Send WhatsApp via Twilio ────────────────────────────────────────────────
 async function sendWhatsApp(to, text) {
   try {
-    const response = await axios.post(
-      `https://graph.facebook.com/v19.0/${process.env.META_PHONE_NUMBER_ID}/messages`,
-      {
-        messaging_product: 'whatsapp',
-        to: to,
-        type: 'text',
-        text: { body: text },
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${process.env.META_ACCESS_TOKEN}`,
-          'Content-Type': 'application/json',
-        },
-      }
-    );
-    console.log(`Sent to ${to}:`, JSON.stringify(response.data));
+    const msg = await twilioClient.messages.create({
+      from: `whatsapp:${process.env.TWILIO_WHATSAPP_NUMBER}`,
+      to: to,
+      body: text,
+    });
+    console.log(`Sent to ${to}:`, msg.sid);
   } catch (err) {
-    console.error(`Failed to send to ${to}:`, JSON.stringify(err.response?.data) || err.message);
+    console.error(`Failed to send to ${to}:`, err.message);
   }
 }
 
