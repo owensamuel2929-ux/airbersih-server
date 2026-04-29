@@ -249,7 +249,7 @@ app.post('/webhook/xendit', async (req, res) => {
 // ─── Send WhatsApp via Meta Cloud API ───────────────────────────────────────
 async function sendWhatsApp(to, text) {
   try {
-    await axios.post(
+    const response = await axios.post(
       `https://graph.facebook.com/v19.0/${process.env.META_PHONE_NUMBER_ID}/messages`,
       {
         messaging_product: 'whatsapp',
@@ -264,6 +264,7 @@ async function sendWhatsApp(to, text) {
         },
       }
     );
+    console.log(`Sent to ${to}:`, JSON.stringify(response.data));
   } catch (err) {
     console.error(`Failed to send to ${to}:`, JSON.stringify(err.response?.data) || err.message);
   }
