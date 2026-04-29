@@ -1,0 +1,10 @@
+#ngrok
+ngrok config add-authtoken 3CysBOrN3HkMg1p3AudRUTYFXBS_5Eet522FpUXintsrdGk2c
+https://buffed-balancing-irritably.ngrok-free.dev 
+
+#Terminal 1:
+node server/index.js
+#Terminal 2:
+cd C:\ngrok
+.\ngrok.exe http 3000
+
