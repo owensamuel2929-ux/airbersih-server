@@ -265,7 +265,7 @@ async function sendWhatsApp(to, text) {
       }
     );
   } catch (err) {
-    console.error(`Failed to send to ${to}:`, err.response?.data || err.message);
+    console.error(`Failed to send to ${to}:`, JSON.stringify(err.response?.data) || err.message);
   }
 }
 
